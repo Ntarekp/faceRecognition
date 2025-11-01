@@ -1,72 +1,105 @@
 import cv2
 import time
-import math
+import serial
 
-# Load the Haar Cascade for face detection
+# ========== CONFIGURATION ==========
+SERIAL_PORT = 'COM23'
+BAUD_RATE = 9600
+CAMERA_INDEX = 1
+MOTOR_STEP = 3          # Simulated degrees per move
+MIN_POS = 0
+MAX_POS = 180
+
+# ==================================
+arduino = serial.Serial(SERIAL_PORT, BAUD_RATE)
+time.sleep(2)  # Wait for Arduino to initialize
+
+# Load Haar Cascade
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-# Start the webcam
-cap = cv2.VideoCapture(1)
+# Start video capture
+cap = cv2.VideoCapture(CAMERA_INDEX)
 
 prev_cx, prev_cy = None, None
 prev_time = time.time()
-direction = ""
-speed = 0.0
+
+# Track motor position locally (simulated)
+motor_angle = 90  # start centered
+direction = "Stationary"
+
+print("\n🎯 FACE TRACKER PRESENTATION MODE")
+print("Press 'Q' to quit.\n")
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Convert to grayscale for better detection
+    frame = cv2.flip(frame, 1)  # mirror effect
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))
 
-    # Detect faces
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
+    current_time = time.time()
+    time_diff = current_time - prev_time if prev_time else 1.0
+
+    direction = "Stationary"
+    speed = 0.0
 
     for (x, y, w, h) in faces:
-        # Draw bounding box around face
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-        # Compute center of face
         cx, cy = x + w // 2, y + h // 2
-        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
 
-        # Compare with previous frame
-        if prev_cx is not None and prev_cy is not None:
+        if prev_cx is not None:
             dx = cx - prev_cx
-            dy = cy - prev_cy
+            distance = abs(dx)
 
-            # Time difference between frames
-            current_time = time.time()
-            dt = current_time - prev_time
-            prev_time = current_time
+            if distance > 15:  # movement threshold
+                direction = "Left" if dx > 0 else "Right"
+                speed = distance / time_diff if time_diff > 0 else 0
 
-            # Speed in pixels per second
-            dist = math.sqrt(dx ** 2 + dy ** 2)
-            speed = dist / dt if dt > 0 else 0
+                # Send to Arduino
+                if direction == "Left":
+                    arduino.write(b'L')
+                    motor_angle = min(MAX_POS, motor_angle + MOTOR_STEP)
+                elif direction == "Right":
+                    arduino.write(b'R')
+                    motor_angle = max(MIN_POS, motor_angle - MOTOR_STEP)
 
-            # Determine direction
-            if abs(dx) > abs(dy):
-                direction = "Right" if dx > 10 else "Left" if dx < -10 else "Stationary"
+                print(f"Direction: {direction}, Speed: {speed:.2f}, Motor Angle: {motor_angle}°")
             else:
-                direction = "Down" if dy > 10 else "Up" if dy < -10 else "Stationary"
+                direction = "Stationary"
+        else:
+            direction = "Stationary"
 
-        # Update previous center
         prev_cx, prev_cy = cx, cy
+        prev_time = current_time
+        break  # process only the first face
 
-        # Display direction and speed
-        cv2.putText(frame, f"Direction: {direction}", (20, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"Speed: {speed:.2f} px/s", (20, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    # ===== Overlay UI =====
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
 
-    # Display the result
-    cv2.imshow('Face Direction Tracker', frame)
+    # Add transparent bar at bottom
+    cv2.rectangle(overlay, (0, h - 100), (w, h), (30, 30, 30), -1)
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
 
-    # Press 'q' to exit
+    # Status text
+    cv2.putText(frame, f"Direction: {direction}", (20, h - 65),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    cv2.putText(frame, f"Motor Position: {motor_angle}°", (20, h - 35),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    cv2.putText(frame, f"Speed: {speed:.1f} px/s", (20, h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+    # Show camera feed
+    cv2.imshow('Face Tracker - Presentation Mode', frame)
+
+    # Exit key
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
+# Cleanup
 cap.release()
+arduino.close()
 cv2.destroyAllWindows()
